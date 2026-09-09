@@ -48,6 +48,12 @@ jobs:
       - name: Copy boards folder
         run: cp -r builder/boards/* firmware/boards/
 
+      - name: Modify MQTT.cpp line (optional)
+        if: inputs.modify_mqtt_line == true
+        working-directory: firmware
+        run: |
+          sed -i 's#bool dontUplink = !mp_decoded.decoded.has_bitfield || !(mp_decoded.decoded.bitfield & BITFIELD_OK_TO_MQTT_MASK);#bool dontUplink = false;#' src/mqtt/MQTT.cpp
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -58,35 +64,70 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Attempt Build (Allowed to fail)
-        working-directory: firmware
-        run: pio run -e ${{ inputs.variant }} --disable-auto-clean || echo "BUILD FAILED AS EXPECTED - RUNNING DIAGNOSTICS"
-
-      - name: DIAGNOSTIC - Find all SCons traces
-        if: always()
+      - name: Bootstrap PlatformIO Virtualenv
         run: |
-          echo "================================================================"
-          echo ">>> 1. Szukam WSZYSTKICH plików o nazwie FortranCommon.py w systemie:"
-          echo "================================================================"
-          sudo find / -name "FortranCommon.py" 2>/dev/null || echo "NIE ZNALEZIONO ŻADNEGO pliku FortranCommon.py!"
+          # Wymuszamy na PlatformIO utworzenie katalogu 'penv' i zainstalowanie podstawowych pakietów
+          pio system info
 
-          echo ""
-          echo "================================================================"
-          echo ">>> 2. Szukam WSZYSTKICH katalogów zawierających 'scons' (bez rozróżniania wielkości liter):"
-          echo "================================================================"
-          sudo find / -iname "*scons*" -type d 2>/dev/null
+      - name: Inject Meta-Path SCons Mock Hook
+        run: |
+          # Ten skrypt znajduje WSZYSTKIE foldery site-packages wewnątrz .platformio (główne penv i idf penv)
+          # i umieszcza w nich sitecustomize.py, który w locie przechwytuje importy Fortrana z archiwów ZIP.
+          python3 -c "
+          import os
 
-          echo ""
-          echo "================================================================"
-          echo ">>> 3. Szukam WSZYSTKICH plików SCons.py oraz scons.py (executables):"
-          echo "================================================================"
-          sudo find / -iname "scons*.py" 2>/dev/null
-          sudo find / -iname "scons" -type f 2>/dev/null
+          hook_code = '''import sys, types
+          from importlib.abc import MetaPathFinder, Loader
+          from importlib.machinery import ModuleSpec
 
-          echo ""
-          echo "================================================================"
-          echo ">>> 4. Zawartość głównego katalogu penv (jeśli istnieje):"
-          echo "================================================================"
-          ls -la /home/runner/.platformio/penv/ 2>/dev/null || echo "Brak penv"
-          echo "--- Podfoldery penv (lib): ---"
-          find /home/runner/.platformio/penv -type d -iname "*scons*" 2>/dev/null
+          class FortranMock(types.ModuleType):
+              def __getattr__(self, name):
+                  def dummy(*args, **kwargs):
+                      if args: return args[0]
+                      return []
+                  return dummy
+
+          class FortranMockFinder(MetaPathFinder):
+              def find_spec(self, fullname, path, target=None):
+                  if 'Fortran' in fullname or fullname == 'SCons.Tool.fortran':
+                      return ModuleSpec(fullname, FortranMockLoader(fullname))
+                  return None
+
+          class FortranMockLoader(Loader):
+              def __init__(self, fullname):
+                  self.fullname = fullname
+              def create_module(self, spec):
+                  return FortranMock(self.fullname)
+              def exec_module(self, module):
+                  pass
+
+          sys.meta_path.insert(0, FortranMockFinder())
+          print('SCons Fortran Import Interceptor Active!')
+          '''
+
+          patched = 0
+          for root, dirs, files in os.walk('/home/runner/.platformio'):
+              if root.endswith('site-packages') or root.endswith('site-packages/'):
+                  target = os.path.join(root, 'sitecustomize.py')
+                  print(f'Injecting hook to: {target}')
+                  with open(target, 'w') as f:
+                      f.write(hook_code)
+                  patched += 1
+          print(f'Done! Injected hook to {patched} python environments.')
+          "
+
+      - name: Build firmware
+        working-directory: firmware
+        run: pio run -e ${{ inputs.variant }} --disable-auto-clean
+
+      - name: Create firmware archive
+        run: |
+          cd firmware/.pio/build/${{ inputs.variant }}
+          tar -cJf ${{ env.FIRMWARE_ARCHIVE }} --ignore-failed-read *.bin *.uf2
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FIRMWARE_ARCHIVE }}
+          path: firmware/.pio/build/${{ inputs.variant }}/${{ env.FIRMWARE_ARCHIVE }}
+          if-no-files-found: error
