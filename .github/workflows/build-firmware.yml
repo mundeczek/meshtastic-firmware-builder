@@ -29,12 +29,12 @@ jobs:
 
     steps:
       - name: Checkout this repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           path: builder
 
       - name: Checkout meshtastic/firmware
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: meshtastic/firmware
           ref: ${{ inputs.firmware_branch }}
@@ -54,7 +54,7 @@ jobs:
           sed -i 's#bool dontUplink = !mp_decoded.decoded.has_bitfield || !(mp_decoded.decoded.bitfield & BITFIELD_OK_TO_MQTT_MASK);#bool dontUplink = false;#' src/mqtt/MQTT.cpp
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -63,21 +63,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Pre-install PlatformIO Packages (to download SCons)
+      - name: Initial Build (Fetch tools and compile sources)
         working-directory: firmware
         run: |
-          # Ta komenda pobierze platformę pioarduino oraz pakiety SCons, ale jeszcze nie uruchomi kompilacji
-          pio pkg install --environment ${{ inputs.variant }} || true
+          # Pierwszy przebieg dociąga pioarduino i narzędzia, ignorujemy błąd linkera na końcu
+          pio run -e ${{ inputs.variant }} --disable-auto-clean || true
 
-      - name: Patch SCons (Fix FortranCommon bug)
+      - name: Auto-Patch SCons Fortran Modules
         run: |
-          # Znajduje wszystkie foldery narzędziowe SCons i pobiera do nich brakujący plik z oficjalnego repozytorium SCons 4.7.0
-          find /home/runner/.platformio/packages/tool-scons -type d -path "*/SCons/Tool" | while read -r dir; do
-            echo "Patching SCons in: $dir"
-            curl -sSL "https://raw.githubusercontent.com/SCons/scons/4.7.0/SCons/Tool/FortranCommon.py" -o "$dir/FortranCommon.py"
-          done
+          python3 -c "
+          import os, urllib.request
 
-      - name: Build firmware
+          def patch_files(url, filename, folder_suffix):
+              try:
+                  content = urllib.request.urlopen(url).read()
+                  for root, dirs, files in os.walk('/home/runner'):
+                      if root.endswith(folder_suffix) or root.endswith(folder_suffix + '/'):
+                          target = os.path.join(root, filename)
+                          print(f'Patching: {target}')
+                          with open(target, 'wb') as f:
+                              f.write(content)
+              except Exception as e:
+                  print(f'Error patching {filename}: {e}')
+
+          patch_files(
+              'https://raw.githubusercontent.com/SCons/scons/4.7.0/SCons/Tool/FortranCommon.py',
+              'FortranCommon.py',
+              'SCons/Tool'
+          )
+          patch_files(
+              'https://raw.githubusercontent.com/SCons/scons/4.7.0/SCons/Scanner/Fortran.py',
+              'Fortran.py',
+              'SCons/Scanner'
+          )
+          "
+
+      - name: Finalize Build (Link ELF and generate BIN)
         working-directory: firmware
         run: pio run -e ${{ inputs.variant }} --disable-auto-clean
 
@@ -87,9 +108,8 @@ jobs:
           tar -cJf ${{ env.FIRMWARE_ARCHIVE }} --ignore-failed-read *.bin *.uf2
 
       - name: Upload firmware artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ env.FIRMWARE_ARCHIVE }}
           path: firmware/.pio/build/${{ inputs.variant }}/${{ env.FIRMWARE_ARCHIVE }}
-          archive: false
           if-no-files-found: error
