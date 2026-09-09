@@ -9,9 +9,10 @@ on:
         type: string
         default: "develop"
       variant:
-        description: "Variant to build (e.g., cutretech-esp32s3)"
+        description: "Variant to build (e.g., xiaowa-esp32s3)"
         required: true
         type: string
+        default: "xiaowa-esp32s3"
       modify_mqtt_line:
         description: "mqqt me bro"
         required: true
@@ -63,42 +64,40 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Initial Build (Fetch tools and compile sources)
-        working-directory: firmware
-        run: |
-          # Pierwszy przebieg dociąga pioarduino i narzędzia, ignorujemy błąd linkera na końcu
-          pio run -e ${{ inputs.variant }} --disable-auto-clean || true
-
-      - name: Auto-Patch SCons Fortran Modules
+      - name: Inject SCons Fortran Hook into Python
         run: |
           python3 -c "
-          import os, urllib.request
+          import site, os
 
-          def patch_files(url, filename, folder_suffix):
-              try:
-                  content = urllib.request.urlopen(url).read()
-                  for root, dirs, files in os.walk('/home/runner'):
-                      if root.endswith(folder_suffix) or root.endswith(folder_suffix + '/'):
-                          target = os.path.join(root, filename)
-                          print(f'Patching: {target}')
-                          with open(target, 'wb') as f:
-                              f.write(content)
-              except Exception as e:
-                  print(f'Error patching {filename}: {e}')
+          hook_code = '''import sys, types
+          from importlib.abc import MetaPathFinder, Loader
+          from importlib.machinery import ModuleSpec
 
-          patch_files(
-              'https://raw.githubusercontent.com/SCons/scons/4.7.0/SCons/Tool/FortranCommon.py',
-              'FortranCommon.py',
-              'SCons/Tool'
-          )
-          patch_files(
-              'https://raw.githubusercontent.com/SCons/scons/4.7.0/SCons/Scanner/Fortran.py',
-              'Fortran.py',
-              'SCons/Scanner'
-          )
+          class FortranMockFinder(MetaPathFinder, Loader):
+              def find_spec(self, fullname, path, target=None):
+                  if 'Fortran' in fullname:
+                      return ModuleSpec(fullname, self)
+                  return None
+              def create_module(self, spec):
+                  mod = types.ModuleType(spec.name)
+                  mod.DialectDirs = lambda *args, **kwargs: None
+                  mod.FortranEmitter = lambda *args, **kwargs: args[0] if args else None
+                  mod.ShFortranEmitter = lambda *args, **kwargs: args[0] if args else None
+                  return mod
+              def exec_module(self, module):
+                  pass
+
+          sys.meta_path.insert(0, FortranMockFinder())
+          '''
+
+          for sp in site.getsitepackages():
+              target = os.path.join(sp, 'sitecustomize.py')
+              with open(target, 'w') as f:
+                  f.write(hook_code)
+              print(f'Installed hook in: {target}')
           "
 
-      - name: Finalize Build (Link ELF and generate BIN)
+      - name: Build firmware
         working-directory: firmware
         run: pio run -e ${{ inputs.variant }} --disable-auto-clean
 
