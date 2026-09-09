@@ -64,37 +64,45 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Inject SCons Fortran Hook into Python
+      - name: Force Download Platform and Tools
+        working-directory: firmware
         run: |
+          # Ta komenda pobiera platformę pioarduino i narzędzie tool-scons na dysk runnera
+          pio platform install "https://github.com/meshtastic/pioarduino-platform-espressif32/archive/refs/heads/55.03.311.zip"
+
+      - name: Inject Dummy Fortran Modules into SCons
+        run: |
+          # Rekurencyjnie przeszukuje cały folder .platformio w poszukiwaniu katalogów SCons i tworzy atrapy
           python3 -c "
-          import site, os
+          import os
 
-          hook_code = '''import sys, types
-          from importlib.abc import MetaPathFinder, Loader
-          from importlib.machinery import ModuleSpec
-
-          class FortranMockFinder(MetaPathFinder, Loader):
-              def find_spec(self, fullname, path, target=None):
-                  if 'Fortran' in fullname:
-                      return ModuleSpec(fullname, self)
-                  return None
-              def create_module(self, spec):
-                  mod = types.ModuleType(spec.name)
-                  mod.DialectDirs = lambda *args, **kwargs: None
-                  mod.FortranEmitter = lambda *args, **kwargs: args[0] if args else None
-                  mod.ShFortranEmitter = lambda *args, **kwargs: args[0] if args else None
-                  return mod
-              def exec_module(self, module):
-                  pass
-
-          sys.meta_path.insert(0, FortranMockFinder())
+          dummy_fortran_common = '''
+          def DialectDirs(*args, **kwargs): return []
+          def FortranEmitter(*args, **kwargs): return args[0] if args else None
+          def ShFortranEmitter(*args, **kwargs): return args[0] if args else None
           '''
 
-          for sp in site.getsitepackages():
-              target = os.path.join(sp, 'sitecustomize.py')
-              with open(target, 'w') as f:
-                  f.write(hook_code)
-              print(f'Installed hook in: {target}')
+          dummy_fortran_scanner = '''
+          def FortranScanType1(*args, **kwargs): return None
+          def FortranScanType2(*args, **kwargs): return None
+          '''
+
+          patched_count = 0
+          for root, dirs, files in os.walk('/home/runner/.platformio'):
+              if root.endswith('SCons/Tool') or root.endswith('SCons/Tool/'):
+                  target = os.path.join(root, 'FortranCommon.py')
+                  print(f'Patching: {target}')
+                  with open(target, 'w') as f:
+                      f.write(dummy_fortran_common)
+                  patched_count += 1
+              if root.endswith('SCons/Scanner') or root.endswith('SCons/Scanner/'):
+                  target = os.path.join(root, 'Fortran.py')
+                  print(f'Patching: {target}')
+                  with open(target, 'w') as f:
+                      f.write(dummy_fortran_scanner)
+                  patched_count += 1
+
+          print(f'Done! Patched {patched_count} SCons directories.')
           "
 
       - name: Build firmware
