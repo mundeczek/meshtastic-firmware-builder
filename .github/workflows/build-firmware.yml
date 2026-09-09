@@ -64,45 +64,52 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Force Download Platform and Tools
+      - name: Pre-install PlatformIO Packages
         working-directory: firmware
         run: |
-          # Ta komenda pobiera platformę pioarduino i narzędzie tool-scons na dysk runnera
-          pio platform install "https://github.com/meshtastic/pioarduino-platform-espressif32/archive/refs/heads/55.03.311.zip"
+          # Wymuszamy instalację i rozpakowanie wszystkich narzędzi dla danego wariantu
+          pio pkg install -e ${{ inputs.variant }}
 
-      - name: Inject Dummy Fortran Modules into SCons
+      - name: Deep Search & Patch SCons (Fix Fortran Bug)
         run: |
-          # Rekurencyjnie przeszukuje cały folder .platformio w poszukiwaniu katalogów SCons i tworzy atrapy
           python3 -c "
-          import os
+          import os, urllib.request
 
-          dummy_fortran_common = '''
-          def DialectDirs(*args, **kwargs): return []
-          def FortranEmitter(*args, **kwargs): return args[0] if args else None
-          def ShFortranEmitter(*args, **kwargs): return args[0] if args else None
-          '''
+          fortran_common_url = 'https://raw.githubusercontent.com/SCons/scons/4.7.0/SCons/Tool/FortranCommon.py'
+          fortran_scanner_url = 'https://raw.githubusercontent.com/SCons/scons/4.7.0/SCons/Scanner/Fortran.py'
 
-          dummy_fortran_scanner = '''
-          def FortranScanType1(*args, **kwargs): return None
-          def FortranScanType2(*args, **kwargs): return None
-          '''
+          try:
+              print('Downloading original SCons Fortran files...')
+              fortran_common_code = urllib.request.urlopen(fortran_common_url).read()
+              fortran_scanner_code = urllib.request.urlopen(fortran_scanner_url).read()
+          except Exception as e:
+              print('Failed to download from GitHub, using dummies:', e)
+              fortran_common_code = b'def DialectDirs(*args,**kwargs): return []\ndef FortranEmitter(*args,**kwargs): return args[0] if args else None\ndef ShFortranEmitter(*args,**kwargs): return args[0] if args else None'
+              fortran_scanner_code = b'def FortranScanType1(*args,**kwargs): return None'
 
+          print('Scanning directory tree for SCons installations...')
           patched_count = 0
-          for root, dirs, files in os.walk('/home/runner/.platformio'):
-              if root.endswith('SCons/Tool') or root.endswith('SCons/Tool/'):
-                  target = os.path.join(root, 'FortranCommon.py')
-                  print(f'Patching: {target}')
-                  with open(target, 'w') as f:
-                      f.write(dummy_fortran_common)
-                  patched_count += 1
-              if root.endswith('SCons/Scanner') or root.endswith('SCons/Scanner/'):
-                  target = os.path.join(root, 'Fortran.py')
-                  print(f'Patching: {target}')
-                  with open(target, 'w') as f:
-                      f.write(dummy_fortran_scanner)
-                  patched_count += 1
+          for root, dirs, files in os.walk('/home/runner'):
+              if 'SCons' in dirs:
+                  scons_path = os.path.join(root, 'SCons')
+                  tool_dir = os.path.join(scons_path, 'Tool')
+                  scanner_dir = os.path.join(scons_path, 'Scanner')
+                  
+                  if os.path.exists(tool_dir):
+                      target_common = os.path.join(tool_dir, 'FortranCommon.py')
+                      print(f'-> Patching: {target_common}')
+                      with open(target_common, 'wb') as f:
+                          f.write(fortran_common_code)
+                      patched_count += 1
+                      
+                  if os.path.exists(scanner_dir):
+                      target_scanner = os.path.join(scanner_dir, 'Fortran.py')
+                      print(f'-> Patching: {target_scanner}')
+                      with open(target_scanner, 'wb') as f:
+                          f.write(fortran_scanner_code)
+                      patched_count += 1
 
-          print(f'Done! Patched {patched_count} SCons directories.')
+          print(f'Successfully patched {patched_count} Fortran files across all SCons environments!')
           "
 
       - name: Build firmware
