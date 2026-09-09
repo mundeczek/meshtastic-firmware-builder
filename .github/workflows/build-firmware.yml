@@ -64,38 +64,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Force PlatformIO to Download SCons and Tools
+      - name: Download and Patch espressif32 Platform Config
+        run: |
+          # 1. Pobieramy platformę pioarduino używaną przez Meshtastic 2.8
+          wget -q https://github.com/meshtastic/pioarduino-platform-espressif32/archive/refs/heads/55.03.311.zip
+          unzip -q 55.03.311.zip
+          mv pioarduino-platform-espressif32-55.03.311 platform-espressif32
+          
+          # 2. Podmieniamy wymagany SCons na wersję 4.7.0 (4.40700.0) posiadającą FortranCommon
+          sed -i 's/"tool-scons": "[^"]*"/"tool-scons": "~4.40700.0"/g' platform-espressif32/platform.json
+          
+          echo "Zweryfikowana wersja tool-scons w platform.json:"
+          grep "tool-scons" platform-espressif32/platform.json
+
+      - name: Redirect PlatformIO to patched local platform
         working-directory: firmware
         run: |
-          # Uruchomienie celu 'clean' zmusza PlatformIO do pobrania i rozpakowania 
-          # platformy pioarduino, kompilatorów oraz SCons, ale nie uruchamia samej kompilacji.
-          pio run -e ${{ inputs.variant }} -t clean
-
-      - name: Patch SCons (Fix Fortran Bug on disk)
-        run: |
-          # Skanujemy cały katalog .platformio i wstrzykujemy poprawki bezpośrednio do pobranych plików
-          python3 -c "
-          import os
-          dummy_common = 'def DialectDirs(*args,**kwargs): return []\ndef FortranEmitter(*args,**kwargs): return args[0] if args else None\ndef ShFortranEmitter(*args,**kwargs): return args[0] if args else None\n'
-          dummy_scanner = 'def FortranScanType1(*args,**kwargs): return None\ndef FortranScanType2(*args,**kwargs): return None\n'
-
-          print('Przeszukiwanie pobranych pakietów SCons...')
-          patched = 0
-          for root, dirs, files in os.walk('/home/runner/.platformio'):
-              if root.endswith('SCons/Tool') or root.endswith('SCons/Tool/'):
-                  target = os.path.join(root, 'FortranCommon.py')
-                  with open(target, 'w') as f:
-                      f.write(dummy_common)
-                  print(f'-> Załatano narzędzia: {target}')
-                  patched += 1
-              if root.endswith('SCons/Scanner') or root.endswith('SCons/Scanner/'):
-                  target = os.path.join(root, 'Fortran.py')
-                  with open(target, 'w') as f:
-                      f.write(dummy_scanner)
-                  print(f'-> Załatano skaner: {target}')
-                  patched += 1
-          print(f'Sukces! Załatano łącznie {patched} lokalizacji SCons.')
-          "
+          # Podmieniamy link URL w platformio.ini na naszą lokalną, załataną platformę
+          sed -i 's|platform = https://github.com/meshtastic/pioarduino-platform-espressif32/archive/refs/heads/55.03.311.zip|platform = file://${{ github.workspace }}/platform-espressif32|g' platformio.ini
+          
+          echo "Zweryfikowana ścieżka platformy w platformio.ini:"
+          grep "platform =" platformio.ini | head -n 5
 
       - name: Build firmware
         working-directory: firmware
