@@ -64,57 +64,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Pre-install PlatformIO Packages
-        working-directory: firmware
+      - name: Start SCons Watchdog (Background Patching)
         run: |
-          # Wymuszamy instalację i rozpakowanie wszystkich narzędzi dla danego wariantu
-          pio pkg install -e ${{ inputs.variant }}
-
-      - name: Deep Search & Patch SCons (Fix Fortran Bug)
-        run: |
-          python3 -c "
-          import os, urllib.request
-
-          fortran_common_url = 'https://raw.githubusercontent.com/SCons/scons/4.7.0/SCons/Tool/FortranCommon.py'
-          fortran_scanner_url = 'https://raw.githubusercontent.com/SCons/scons/4.7.0/SCons/Scanner/Fortran.py'
-
-          try:
-              print('Downloading original SCons Fortran files...')
-              fortran_common_code = urllib.request.urlopen(fortran_common_url).read()
-              fortran_scanner_code = urllib.request.urlopen(fortran_scanner_url).read()
-          except Exception as e:
-              print('Failed to download from GitHub, using dummies:', e)
-              fortran_common_code = b'def DialectDirs(*args,**kwargs): return []\ndef FortranEmitter(*args,**kwargs): return args[0] if args else None\ndef ShFortranEmitter(*args,**kwargs): return args[0] if args else None'
-              fortran_scanner_code = b'def FortranScanType1(*args,**kwargs): return None'
-
-          print('Scanning directory tree for SCons installations...')
-          patched_count = 0
-          for root, dirs, files in os.walk('/home/runner'):
-              if 'SCons' in dirs:
-                  scons_path = os.path.join(root, 'SCons')
-                  tool_dir = os.path.join(scons_path, 'Tool')
-                  scanner_dir = os.path.join(scons_path, 'Scanner')
-                  
-                  if os.path.exists(tool_dir):
-                      target_common = os.path.join(tool_dir, 'FortranCommon.py')
-                      print(f'-> Patching: {target_common}')
-                      with open(target_common, 'wb') as f:
-                          f.write(fortran_common_code)
-                      patched_count += 1
-                      
-                  if os.path.exists(scanner_dir):
-                      target_scanner = os.path.join(scanner_dir, 'Fortran.py')
-                      print(f'-> Patching: {target_scanner}')
-                      with open(target_scanner, 'wb') as f:
-                          f.write(fortran_scanner_code)
-                      patched_count += 1
-
-          print(f'Successfully patched {patched_count} Fortran files across all SCons environments!')
-          "
+          echo "Uruchamianie patchera w tle..."
+          (
+          while true; do
+            # Przeszukaj katalog domowy w poszukiwaniu nowo powstałych folderów SCons/Tool
+            find /home/runner -type d -path "*/SCons/Tool" 2>/dev/null | while read -r dir; do
+              if [ ! -f "$dir/FortranCommon.py" ]; then
+                echo "Watchdog: Wykryto SCons! Wstrzykiwanie FortranCommon.py do $dir"
+                echo -e "def DialectDirs(*args,**kwargs): return []\ndef FortranEmitter(*args,**kwargs): return args[0] if args else None\ndef ShFortranEmitter(*args,**kwargs): return args[0] if args else None" > "$dir/FortranCommon.py"
+              fi
+            done
+            
+            # Przeszukaj w poszukiwaniu SCons/Scanner
+            find /home/runner -type d -path "*/SCons/Scanner" 2>/dev/null | while read -r dir; do
+              if [ ! -f "$dir/Fortran.py" ]; then
+                echo "Watchdog: Wykryto SCons Scanner! Wstrzykiwanie Fortran.py do $dir"
+                echo -e "def FortranScanType1(*args,**kwargs): return None\ndef FortranScanType2(*args,**kwargs): return None" > "$dir/Fortran.py"
+              fi
+            done
+            sleep 1
+          done
+          ) &
+          echo "WATCHDOG_PID=$!" >> $GITHUB_ENV
 
       - name: Build firmware
         working-directory: firmware
         run: pio run -e ${{ inputs.variant }} --disable-auto-clean
+
+      - name: Stop SCons Watchdog
+        if: always()
+        run: |
+          if [ -n "$WATCHDOG_PID" ]; then
+            echo "Zatrzymywanie patchera (PID: $WATCHDOG_PID)..."
+            kill $WATCHDOG_PID || true
+          fi
 
       - name: Create firmware archive
         run: |
