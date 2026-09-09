@@ -26,6 +26,7 @@ jobs:
 
     env:
       FIRMWARE_ARCHIVE: firmware-${{ inputs.variant }}-${{ inputs.firmware_branch }}.tar.xz
+      PYTHONPATH: ${{ github.workspace }}/shims
 
     steps:
       - name: Checkout this repository
@@ -58,15 +59,32 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Create SCons Fortran Shim
+        run: |
+          mkdir -p "${{ github.workspace }}/shims"
+          cat << 'EOF' > "${{ github.workspace }}/shims/sitecustomize.py"
+          import sys
+          import types
+
+          class SConsFortranMock(types.ModuleType):
+              def __getattr__(self, name):
+                  def _dummy_func(*args, **kwargs):
+                      if len(args) >= 2:
+                          return args[0], args[1]
+                      return None
+                  return _dummy_func
+
+          sys.modules['SCons.Tool.FortranCommon'] = SConsFortranMock('SCons.Tool.FortranCommon')
+          EOF
+
       - name: Install PlatformIO
         run: |
           python -m pip install --upgrade pip
           pip install --upgrade platformio
-          pip install "scons<4.8.0" --force-reinstall
 
       - name: Build firmware
         working-directory: firmware
-        run:  pio run -e ${{ inputs.variant }} --disable-auto-clean
+        run: pio run -e ${{ inputs.variant }} --disable-auto-clean
 
       - name: Create firmware archive
         run: |
