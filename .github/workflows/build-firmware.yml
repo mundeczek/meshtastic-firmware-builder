@@ -64,56 +64,37 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Bootstrap PlatformIO Virtualenv
+      - name: Force PlatformIO to Download SCons and Tools
+        working-directory: firmware
         run: |
-          # Wymuszamy na PlatformIO utworzenie katalogu 'penv' i zainstalowanie podstawowych pakietów
-          pio system info
+          # Uruchomienie celu 'clean' zmusza PlatformIO do pobrania i rozpakowania 
+          # platformy pioarduino, kompilatorów oraz SCons, ale nie uruchamia samej kompilacji.
+          pio run -e ${{ inputs.variant }} -t clean
 
-      - name: Inject Meta-Path SCons Mock Hook
+      - name: Patch SCons (Fix Fortran Bug on disk)
         run: |
-          # Ten skrypt znajduje WSZYSTKIE foldery site-packages wewnątrz .platformio (główne penv i idf penv)
-          # i umieszcza w nich sitecustomize.py, który w locie przechwytuje importy Fortrana z archiwów ZIP.
+          # Skanujemy cały katalog .platformio i wstrzykujemy poprawki bezpośrednio do pobranych plików
           python3 -c "
           import os
+          dummy_common = 'def DialectDirs(*args,**kwargs): return []\ndef FortranEmitter(*args,**kwargs): return args[0] if args else None\ndef ShFortranEmitter(*args,**kwargs): return args[0] if args else None\n'
+          dummy_scanner = 'def FortranScanType1(*args,**kwargs): return None\ndef FortranScanType2(*args,**kwargs): return None\n'
 
-          hook_code = '''import sys, types
-          from importlib.abc import MetaPathFinder, Loader
-          from importlib.machinery import ModuleSpec
-
-          class FortranMock(types.ModuleType):
-              def __getattr__(self, name):
-                  def dummy(*args, **kwargs):
-                      if args: return args[0]
-                      return []
-                  return dummy
-
-          class FortranMockFinder(MetaPathFinder):
-              def find_spec(self, fullname, path, target=None):
-                  if 'Fortran' in fullname or fullname == 'SCons.Tool.fortran':
-                      return ModuleSpec(fullname, FortranMockLoader(fullname))
-                  return None
-
-          class FortranMockLoader(Loader):
-              def __init__(self, fullname):
-                  self.fullname = fullname
-              def create_module(self, spec):
-                  return FortranMock(self.fullname)
-              def exec_module(self, module):
-                  pass
-
-          sys.meta_path.insert(0, FortranMockFinder())
-          print('SCons Fortran Import Interceptor Active!')
-          '''
-
+          print('Przeszukiwanie pobranych pakietów SCons...')
           patched = 0
           for root, dirs, files in os.walk('/home/runner/.platformio'):
-              if root.endswith('site-packages') or root.endswith('site-packages/'):
-                  target = os.path.join(root, 'sitecustomize.py')
-                  print(f'Injecting hook to: {target}')
+              if root.endswith('SCons/Tool') or root.endswith('SCons/Tool/'):
+                  target = os.path.join(root, 'FortranCommon.py')
                   with open(target, 'w') as f:
-                      f.write(hook_code)
+                      f.write(dummy_common)
+                  print(f'-> Załatano narzędzia: {target}')
                   patched += 1
-          print(f'Done! Injected hook to {patched} python environments.')
+              if root.endswith('SCons/Scanner') or root.endswith('SCons/Scanner/'):
+                  target = os.path.join(root, 'Fortran.py')
+                  with open(target, 'w') as f:
+                      f.write(dummy_scanner)
+                  print(f'-> Załatano skaner: {target}')
+                  patched += 1
+          print(f'Sukces! Załatano łącznie {patched} lokalizacji SCons.')
           "
 
       - name: Build firmware
