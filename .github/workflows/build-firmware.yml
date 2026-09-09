@@ -48,12 +48,6 @@ jobs:
       - name: Copy boards folder
         run: cp -r builder/boards/* firmware/boards/
 
-      - name: Modify MQTT.cpp line (optional)
-        if: inputs.modify_mqtt_line == true
-        working-directory: firmware
-        run: |
-          sed -i 's#bool dontUplink = !mp_decoded.decoded.has_bitfield || !(mp_decoded.decoded.bitfield & BITFIELD_OK_TO_MQTT_MASK);#bool dontUplink = false;#' src/mqtt/MQTT.cpp
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -64,51 +58,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade platformio
 
-      - name: Start SCons Watchdog (Background Patching)
-        run: |
-          echo "Uruchamianie patchera w tle..."
-          (
-          while true; do
-            # Przeszukaj katalog domowy w poszukiwaniu nowo powstałych folderów SCons/Tool
-            find /home/runner -type d -path "*/SCons/Tool" 2>/dev/null | while read -r dir; do
-              if [ ! -f "$dir/FortranCommon.py" ]; then
-                echo "Watchdog: Wykryto SCons! Wstrzykiwanie FortranCommon.py do $dir"
-                echo -e "def DialectDirs(*args,**kwargs): return []\ndef FortranEmitter(*args,**kwargs): return args[0] if args else None\ndef ShFortranEmitter(*args,**kwargs): return args[0] if args else None" > "$dir/FortranCommon.py"
-              fi
-            done
-            
-            # Przeszukaj w poszukiwaniu SCons/Scanner
-            find /home/runner -type d -path "*/SCons/Scanner" 2>/dev/null | while read -r dir; do
-              if [ ! -f "$dir/Fortran.py" ]; then
-                echo "Watchdog: Wykryto SCons Scanner! Wstrzykiwanie Fortran.py do $dir"
-                echo -e "def FortranScanType1(*args,**kwargs): return None\ndef FortranScanType2(*args,**kwargs): return None" > "$dir/Fortran.py"
-              fi
-            done
-            sleep 1
-          done
-          ) &
-          echo "WATCHDOG_PID=$!" >> $GITHUB_ENV
-
-      - name: Build firmware
+      - name: Attempt Build (Allowed to fail)
         working-directory: firmware
-        run: pio run -e ${{ inputs.variant }} --disable-auto-clean
+        run: pio run -e ${{ inputs.variant }} --disable-auto-clean || echo "BUILD FAILED AS EXPECTED - RUNNING DIAGNOSTICS"
 
-      - name: Stop SCons Watchdog
+      - name: DIAGNOSTIC - Find all SCons traces
         if: always()
         run: |
-          if [ -n "$WATCHDOG_PID" ]; then
-            echo "Zatrzymywanie patchera (PID: $WATCHDOG_PID)..."
-            kill $WATCHDOG_PID || true
-          fi
+          echo "================================================================"
+          echo ">>> 1. Szukam WSZYSTKICH plików o nazwie FortranCommon.py w systemie:"
+          echo "================================================================"
+          sudo find / -name "FortranCommon.py" 2>/dev/null || echo "NIE ZNALEZIONO ŻADNEGO pliku FortranCommon.py!"
 
-      - name: Create firmware archive
-        run: |
-          cd firmware/.pio/build/${{ inputs.variant }}
-          tar -cJf ${{ env.FIRMWARE_ARCHIVE }} --ignore-failed-read *.bin *.uf2
+          echo ""
+          echo "================================================================"
+          echo ">>> 2. Szukam WSZYSTKICH katalogów zawierających 'scons' (bez rozróżniania wielkości liter):"
+          echo "================================================================"
+          sudo find / -iname "*scons*" -type d 2>/dev/null
 
-      - name: Upload firmware artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.FIRMWARE_ARCHIVE }}
-          path: firmware/.pio/build/${{ inputs.variant }}/${{ env.FIRMWARE_ARCHIVE }}
-          if-no-files-found: error
+          echo ""
+          echo "================================================================"
+          echo ">>> 3. Szukam WSZYSTKICH plików SCons.py oraz scons.py (executables):"
+          echo "================================================================"
+          sudo find / -iname "scons*.py" 2>/dev/null
+          sudo find / -iname "scons" -type f 2>/dev/null
+
+          echo ""
+          echo "================================================================"
+          echo ">>> 4. Zawartość głównego katalogu penv (jeśli istnieje):"
+          echo "================================================================"
+          ls -la /home/runner/.platformio/penv/ 2>/dev/null || echo "Brak penv"
+          echo "--- Podfoldery penv (lib): ---"
+          find /home/runner/.platformio/penv -type d -iname "*scons*" 2>/dev/null
